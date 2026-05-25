@@ -145,3 +145,70 @@ exports.changePassword = async (req, res) => {
     res.status(500).json({ message: 'Failed to change password' });
   }
 };
+
+// Forgot Password - Step 1: send reset OTP
+exports.forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ message: 'Email is required' });
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user || !user.isVerified) {
+      // Don't reveal if email exists
+      return res.json({ message: 'If this email exists, a reset code has been sent.' });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    user.otp = otp;
+    user.otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+    await user.save();
+
+    const { sendPasswordResetEmail } = require('../config/email');
+    await sendPasswordResetEmail(user.email, user.name, otp);
+
+    res.json({ message: 'Password reset code sent to your email.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed to send reset email' });
+  }
+};
+
+// Forgot Password - Step 2: verify OTP
+exports.verifyResetOTP = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (user.otp !== otp) return res.status(400).json({ message: 'Invalid OTP' });
+    if (new Date() > user.otpExpiry) return res.status(400).json({ message: 'OTP expired. Please request a new one.' });
+
+    // Don't clear OTP yet — needed for reset step
+    res.json({ message: 'OTP verified. Set your new password.' });
+  } catch (err) {
+    res.status(500).json({ message: 'OTP verification failed' });
+  }
+};
+
+// Forgot Password - Step 3: reset password
+exports.resetPassword = async (req, res) => {
+  try {
+    const { email, otp, newPassword, confirmPassword } = req.body;
+    if (!newPassword || !confirmPassword) return res.status(400).json({ message: 'All fields required' });
+    if (newPassword !== confirmPassword) return res.status(400).json({ message: 'Passwords do not match' });
+    if (newPassword.length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters' });
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (user.otp !== otp) return res.status(400).json({ message: 'Invalid session. Please start over.' });
+    if (new Date() > user.otpExpiry) return res.status(400).json({ message: 'Session expired. Please start over.' });
+
+    user.password = await require('bcryptjs').hash(newPassword, 12);
+    user.otp = undefined;
+    user.otpExpiry = undefined;
+    await user.save();
+
+    res.json({ message: 'Password reset successfully! You can now log in.' });
+  } catch (err) {
+    res.status(500).json({ message: 'Password reset failed' });
+  }
+};
